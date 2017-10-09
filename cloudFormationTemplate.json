@@ -1,0 +1,235 @@
+{
+	"Description" : "Craete an Instance install apache web server on it along with Base arcitecture of VPC",
+	"Resources" : {
+		"Ec2Role" : {
+			"Type" : "AWS::IAM::Role",
+			"Properties" : {
+				"AssumeRolePolicyDocument" : {
+					"Statement" : [{
+							"Effect" : "Allow",
+							"Principal" : {
+								"Service" : ["ec2.amazonaws.com"]
+							},
+							"Action" : ["sts:AssumeRole"]
+						}
+					]
+				},
+				"ManagedPolicyArns" :
+				[
+					"arn:aws:iam::aws:policy/AmazonS3FullAccess"
+				]
+			}
+		},
+		"S3Bucket" : {
+			"Type" : "AWS::S3::Bucket",
+			"Properties" : {}
+		},
+
+		"S3bucketPolicy" : {
+			"Type" : "AWS::S3::BucketPolicy",
+			"Properties" : {
+				"Bucket" : {
+					"Ref" : "S3Bucket"
+				},
+				"PolicyDocument" : {
+					"Version" : "2012-10-17",
+					"Statement" : [{
+							"Effect" : "Allow",
+							"Principal" : {
+								"AWS" : [{
+										"Fn::GetAtt" : ["Ec2Role", "Arn"]
+									}
+								]
+							},
+							"Action" : "s3:*",
+							"Resource" : [{
+									"Fn::GetAtt" : ["S3Bucket", "Arn"]
+								}
+							]
+						}
+					]
+				}
+			}
+		},
+
+		"ec2Instanceprofile" : {
+			"Type" : "AWS::IAM::InstanceProfile",
+			"Properties" : {
+				"Roles" : [{
+						"Ref" : "Ec2Role"
+					}
+				]
+			}
+		},
+
+		"vpc" : {
+			"Type" : "AWS::EC2::VPC",
+			"Properties" : {
+				"CidrBlock" : "10.35.0.0/16",
+				"EnableDnsSupport" : "true",
+				"EnableDnsHostnames" : "true"
+			}
+		},
+
+		"inetGateway" : {
+			"Type" : "AWS::EC2::InternetGateway",
+			"DependsOn" : ["vpc"]
+		},
+
+		"attachGateway" : {
+			"Type" : "AWS::EC2::VPCGatewayAttachment",
+			"DependsOn" : ["vpc", "inetGateway"],
+			"Properties" : {
+				"VpcId" : {
+					"Ref" : "vpc"
+				},
+				"InternetGatewayId" : {
+					"Ref" : "inetGateway"
+				}
+			}
+		},
+
+		"publicSubnet" : {
+			"Type" : "AWS::EC2::Subnet",
+			"DependsOn" : ["vpc", "attachGateway"],
+			"Properties" : {
+				"CidrBlock" : "10.35.0.0/24",
+				"AvailabilityZone" : "us-east-1a",
+				"VpcId" : {
+					"Ref" : "vpc"
+				}
+			}
+		},
+
+		"rtbPublic" : {
+			"Type" : "AWS::EC2::RouteTable",
+			"DependsOn" : ["vpc", "attachGateway"],
+			"Properties" : {
+				"VpcId" : {
+					"Ref" : "vpc"
+				}
+			}
+		},
+
+		"routePublic" : {
+			"Type" : "AWS::EC2::Route",
+			"DependsOn" : ["rtbPublic", "attachGateway"],
+			"Properties" : {
+				"DestinationCidrBlock" : "0.0.0.0/0",
+				"RouteTableId" : {
+					"Ref" : "rtbPublic"
+				},
+				"GatewayId" : {
+					"Ref" : "inetGateway"
+				}
+			}
+		},
+
+		"subnetRouteTableAssociationPublic" : {
+			"Type" : "AWS::EC2::SubnetRouteTableAssociation",
+			"DependsOn" : ["rtbPublic", "publicSubnet"],
+			"Properties" : {
+				"RouteTableId" : {
+					"Ref" : "rtbPublic"
+				},
+				"SubnetId" : {
+					"Ref" : "publicSubnet"
+				}
+			}
+		},
+
+		"InstanceSecurityGroup" : {
+			"Type" : "AWS::EC2::SecurityGroup",
+			"Properties" : {
+				"GroupDescription" : "Enable Access to Rails application via port 8090",
+				"VpcId" : {
+					"Ref" : "vpc"
+				},
+				"SecurityGroupIngress" : [{
+						"IpProtocol" : "tcp",
+						"FromPort" : "8090",
+						"ToPort" : "8090",
+						"CidrIp" : "0.0.0.0/0"
+					}
+				]
+			}
+		},
+
+		"ec2Instance" : {
+			"Type" : "AWS::EC2::Instance",			
+			"Properties" : {
+				"IamInstanceProfile" : {
+					"Ref" : "ec2Instanceprofile"
+				},
+				"ImageId" : "ami-841f46ff",
+				"InstanceType" : "t2.micro",
+				"SubnetId" : {
+					"Ref" : "publicSubnet"
+				},
+				"UserData" : {
+					"Fn::Base64" : {
+						"Fn::Join" : ["", [				
+								"#!/bin/bash\n",
+								"#update apt-get\n",
+								"cd /root\n",
+								"apt-get update\n",
+								"apt-get -y install unzip\n",
+								"#install AWS CLI\n",
+								"curl 'https://s3.amazonaws.com/aws-cli/awscli-bundle.zip' -o 'awscli-bundle.zip'\n",
+								"unzip awscli-bundle.zip\n",
+								"/root/awscli-bundle/install -i /usr/local/aws -b /usr/local/bin/aws\n",
+								"#Create custome html file\n",
+								"echo '<html><body><h1>Welcome to apache</h1></body></html>' > /root/index.html\n",
+								"aws s3 cp /root/index.html s3://", {"Ref" : "S3Bucket"}, "/index.html\n",
+								"# install apache\n",
+								"apt-get install apache2 -y\n",
+								"#change default listen port to 8090, copy custom index.html and restart apache\n",
+								"aws s3 cp s3://", {"Ref" : "S3Bucket"}, "/index.html /var/www/\n",
+								"echo 'Listen 8090' >> /etc/apache2/apache2.conf\n",
+								"service apache2 restart\n"
+
+								
+							]]
+					}
+				},
+				"SecurityGroupIds" : [{
+						"Ref" : "InstanceSecurityGroup"
+					}
+				]
+			}
+		},
+
+		"EIP" : {
+			"Type" : "AWS::EC2::EIP",
+			"Properties": {
+					"Domain" : "vpc"
+					},
+			"DependsOn" : ["attachGateway"]
+		},
+		"IPAssoc" : {
+			"Type" : "AWS::EC2::EIPAssociation",
+			"DependsOn" : ["ec2Instance", "EIP"],
+			"Properties" : {
+				"AllocationId": { "Fn::GetAtt" : [ "EIP", "AllocationId" ] },
+				"InstanceId" : {
+					"Ref" : "ec2Instance"
+				}
+			}
+		}
+
+	},
+
+
+
+"Outputs" : {
+	"URL" : {
+		"Description" : "Webserver link",
+		"Value" : {
+			"Fn::Join" : ["", ["http://", {
+						"Ref" : "EIP"
+					}, ":8090/index.html"
+				]]
+		}
+	}
+}
+}
